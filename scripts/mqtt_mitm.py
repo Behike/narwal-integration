@@ -30,8 +30,18 @@ import time
 from pathlib import Path
 
 LISTEN_PORT = 18883
-REAL_BROKER = "us-01.mqtt.narwaltech.com"
 REAL_PORT = 8883
+
+MQTT_REGIONS = {
+    "us": "us-01.mqtt.narwaltech.com",
+    "il": "us-01.mqtt.narwaltech.com",
+    "eu": "eu-01.mqtt.narwaltech.com",
+    "cn": "cn-mqtt.narwaltech.com",
+}
+
+def get_real_broker() -> str:
+    region = os.environ.get("NARWAL_REGION", "il")
+    return MQTT_REGIONS.get(region, MQTT_REGIONS["il"])
 
 
 def generate_self_signed_cert() -> tuple[str, str]:
@@ -43,9 +53,10 @@ def generate_self_signed_cert() -> tuple[str, str]:
         from cryptography.x509.oid import NameOID
         import datetime
 
+        real_broker = get_real_broker()
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, REAL_BROKER),
+            x509.NameAttribute(NameOID.COMMON_NAME, real_broker),
         ])
         cert = (
             x509.CertificateBuilder()
@@ -56,7 +67,7 @@ def generate_self_signed_cert() -> tuple[str, str]:
             .not_valid_before(datetime.datetime.utcnow())
             .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
             .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName(REAL_BROKER)]),
+            x509.SubjectAlternativeName([x509.DNSName(real_broker)]),
                 critical=False,
             )
             .sign(key, hashes.SHA256())
@@ -298,17 +309,17 @@ def handle_client(client_sock: socket.socket, cert_path: str, key_path: str):
     print(f"  Client TLS handshake OK")
 
     # Connect to real broker
-    server_sock = socket.create_connection((REAL_BROKER, REAL_PORT), timeout=10)
+    server_sock = socket.create_connection((real_broker, REAL_PORT), timeout=10)
     server_ctx = ssl.create_default_context()
     try:
-        server_tls = server_ctx.wrap_socket(server_sock, server_hostname=REAL_BROKER)
+        server_tls = server_ctx.wrap_socket(server_sock, server_hostname=real_broker)
     except ssl.SSLError as e:
         print(f"  Server TLS handshake failed: {e}")
         client_tls.close()
         server_sock.close()
         return
 
-    print(f"  Connected to real broker {REAL_BROKER}:{REAL_PORT}")
+    print(f"  Connected to real broker {real_broker}:{REAL_PORT}")
 
     stop = threading.Event()
     t1 = threading.Thread(target=relay, args=(client_tls, server_tls, "APP →", stop), daemon=True)
@@ -334,12 +345,16 @@ def main():
     sock.bind(("0.0.0.0", LISTEN_PORT))
     sock.listen(5)
 
+    real_broker = get_real_broker()
+    
     print(f"\nMQTT MITM listening on port {LISTEN_PORT}")
-    print(f"Proxying to {REAL_BROKER}:{REAL_PORT}")
+    print(f"Proxying to {real_broker}:{REAL_PORT}")
     print(f"\nSetup:")
-    print(f"  1. Enable Internet Sharing (Ethernet → WiFi)")
-    print(f"  2. Connect phone to Mac's hotspot")
-    print(f"  3. Run: echo 'rdr on bridge100 proto tcp from 192.168.2.0/24 to any port 8883 -> 127.0.0.1 port {LISTEN_PORT}' | sudo pfctl -ef -")
+    print(f"  1. Enable Internet Sharing/Hotspot on your computer")
+    print(f"  2. Connect phone to computer's Wi-Fi hotspot")
+    print(f"  3. Route the traffic to MITM:")
+    print(f"     macOS: echo 'rdr on bridge100 proto tcp from 192.168.2.0/24 to any port 8883 -> 127.0.0.1 port {LISTEN_PORT}' | sudo pfctl -ef -")
+    print(f"     Linux: sudo iptables -t nat -A PREROUTING -p tcp --dport 8883 -j REDIRECT --to-port {LISTEN_PORT}")
     print(f"  4. Open Narwal app on phone")
     print(f"\nWaiting for connections...\n")
 

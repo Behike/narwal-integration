@@ -118,6 +118,10 @@ class NarwalClient:
         return f"/{self.product_key}/{self.device_name}"
 
     @property
+    def is_freo_x_plus(self) -> bool:
+        return self.product_key == "3rIGshGNAj"
+
+    @property
     def connected(self) -> bool:
         return self._connected.is_set()
 
@@ -282,7 +286,7 @@ class NarwalClient:
         if topic_suffix == "status/robot_base_status":
             self.state.update_base_status(
                 payload, 
-                is_freo_x_plus=(self.product_key == "3rIGshGNAj")
+                is_freo_x_plus=self.is_freo_x_plus
             )
             self._notify_state_update()
         elif topic_suffix == "status/working_status":
@@ -572,13 +576,22 @@ class NarwalClient:
         return await self.send_command(TOPIC_CMD_GET_CONSUMABLE)
 
     async def get_map(self) -> CommandResponse:
-        """Fetch the current map from the vacuum."""
+        """Fetch the current map from the vacuum (for camera rendering).
+
+        Always uses map/get_map which returns the compressed pixel grid
+        in field 17 for both Ultra and Plus models.
+        """
         return await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
 
     async def fetch_rooms(self) -> None:
-        """Fetch the map and update the room list in self.state."""
+        """Fetch the map and update the room list in self.state.
+
+        Uses map/get_all_reduced_maps for the Freo X Plus (richer room data)
+        and map/get_map for the Ultra.
+        """
         try:
-            resp = await self.get_map()
+            topic = "map/get_all_reduced_maps" if self.is_freo_x_plus else TOPIC_CMD_GET_MAP
+            resp = await self.send_command(topic, timeout=15.0)
             if resp.success and resp.data:
                 self.state.update_rooms_from_map(resp.data)
                 _LOGGER.info("Fetched %d rooms from map", len(self.state.rooms))

@@ -1,6 +1,6 @@
 # Narwal Helper Scripts
 
-Standalone scripts for debugging and exploring the Narwal MQTT protocol outside of Home Assistant.
+Standalone scripts for debugging and exploring the Narwal MQTT protocol outside of Home Assistant. Fully supports both the Narwal Freo X Ultra and Freo X Plus.
 
 ## Prerequisites
 
@@ -49,9 +49,16 @@ The Narwal cloud API does not expose the MQTT device name (a 32-character hex st
 
 **3. Set up the packet redirect** so MQTT traffic (port 8883) from the phone goes to the MITM proxy:
 
+**For macOS:**
 ```bash
 sudo pfctl -d
 echo 'rdr on bridge100 proto tcp from 192.168.2.0/24 to any port 8883 -> 127.0.0.1 port 18883' | sudo pfctl -ef -
+```
+
+**For Linux/Debian:**
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A PREROUTING -p tcp --dport 8883 -j REDIRECT --to-port 18883
 ```
 
 **4. Start the MQTT MITM proxy:**
@@ -73,8 +80,14 @@ The discovered values are also saved to `scripts/discovered_device.txt`.
 
 **6. Clean up** when done:
 
+**For macOS:**
 ```bash
 sudo pfctl -d
+```
+
+**For Linux/Debian:**
+```bash
+sudo iptables -t nat -D PREROUTING -p tcp --dport 8883 -j REDIRECT --to-port 18883
 ```
 
 Then disable Internet Sharing and reconnect your phone to your normal Wi-Fi.

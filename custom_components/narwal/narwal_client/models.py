@@ -188,32 +188,57 @@ class RoomInfo:
 def _parse_rooms_from_field12(map_data: bytes) -> list[RoomInfo]:
     """Extract rooms from repeated field 12 entries in the map protobuf."""
     all_fields = parse_protobuf_repeated(map_data)
+    # If this is the outer payload, map_data is inside field 2
+    # The first field 2 entry might be a device ID string, so we must check all entries.
+    for map_bytes in all_fields.get(2, []):
+        if isinstance(map_bytes, bytes) and len(map_bytes) > 100:  # Valid map is large
+            all_fields = parse_protobuf_repeated(map_bytes)
+            break
+
+    # Both models use 12
     entries = all_fields.get(12, [])
     rooms: list[RoomInfo] = []
     for entry in entries:
         if not isinstance(entry, bytes):
             continue
         rf = parse_protobuf_fields(entry)
-        room_id = rf.get(1)
-        if not isinstance(room_id, int):
-            continue
-        name_raw = rf.get(3, "")
-        if isinstance(name_raw, bytes):
-            try:
-                name = name_raw.decode("utf-8")
-            except UnicodeDecodeError:
-                name = ""
-        elif isinstance(name_raw, str):
-            name = name_raw
-        else:
-            name = ""
-        rooms.append(RoomInfo(
-            room_id=room_id,
-            room_sub_type=rf.get(2, 0) if isinstance(rf.get(2), int) else 0,
-            name=name,
-            category=rf.get(4, 0) if isinstance(rf.get(4), int) else 0,
-            instance_index=rf.get(8, 0) if isinstance(rf.get(8), int) else 0,
-        ))
+        room_id = None
+        sub_type = 0
+        name = ""
+        category = 0
+        instance_index = 0
+
+        # Freo X Ultra/Plus format (field 12): room_id is field 1 (int), sub_type is field 2 (int)
+        if 1 in rf and isinstance(rf[1], int):
+            room_id = rf[1]
+            if 2 in rf and isinstance(rf[2], int):
+                sub_type = rf[2]
+            
+            # Name
+            if 3 in rf:
+                name_raw = rf[3]
+                if isinstance(name_raw, bytes):
+                    try:
+                        name = name_raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+                elif isinstance(name_raw, str):
+                    name = name_raw
+            
+            # Category & Instance index
+            if 4 in rf and isinstance(rf[4], int):
+                category = rf[4]
+            if 8 in rf and isinstance(rf[8], int):
+                instance_index = rf[8]
+
+        if room_id is not None:
+            rooms.append(RoomInfo(
+                room_id=room_id,
+                room_sub_type=sub_type,
+                name=name,
+                category=category,
+                instance_index=instance_index,
+            ))
     return rooms
 
 
