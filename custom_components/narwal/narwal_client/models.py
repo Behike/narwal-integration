@@ -50,7 +50,7 @@ class NarwalState:
     raw_base_status: dict = field(default_factory=dict)
     raw_working_status: dict = field(default_factory=dict)
 
-    def update_base_status(self, payload: bytes) -> None:
+    def update_base_status(self, payload: bytes, is_freo_x_plus: bool = False) -> None:
         """Update from robot_base_status protobuf.
 
         The payload field layout (confirmed via captures):
@@ -89,6 +89,22 @@ class NarwalState:
             _LOGGER.debug("Base status sub-fields: %s", sub)
             if 1 in sub and isinstance(sub[1], int):
                 raw_status = sub[1]
+                
+                if is_freo_x_plus:
+                    # Translate Freo X Plus states to Freo X Ultra compatible WorkingStatus
+                    if raw_status == 2:
+                        if sub.get(2) == 1:
+                            raw_status = WorkingStatus.PAUSED.value
+                        else:
+                            raw_status = WorkingStatus.CLEANING.value
+                    elif raw_status == 10:
+                        raw_status = WorkingStatus.RETURNING.value
+                    elif raw_status == 1:
+                        if sub.get(3) in (1, 6):
+                            raw_status = WorkingStatus.DOCKED.value
+                        else:
+                            raw_status = WorkingStatus.STANDBY.value
+
                 try:
                     self.working_status = WorkingStatus(raw_status)
                 except ValueError:
@@ -136,11 +152,10 @@ class NarwalState:
         self.raw_working_status = fields
         self.device_reachable = True
 
-        if 3 in fields:
+        if 3 in fields and isinstance(fields[3], int):
             self.elapsed_time = fields[3]
-        if 13 in fields:
+        if 13 in fields and isinstance(fields[13], int):
             self.cleaned_area = fields[13]
-
 
 @dataclass
 class RoomInfo:

@@ -280,7 +280,10 @@ class NarwalClient:
         payload = self._extract_app_payload(msg.payload)
 
         if topic_suffix == "status/robot_base_status":
-            self.state.update_base_status(payload)
+            self.state.update_base_status(
+                payload, 
+                is_freo_x_plus=(self.product_key == "3rIGshGNAj")
+            )
             self._notify_state_update()
         elif topic_suffix == "status/working_status":
             self.state.update_working_status(payload)
