@@ -251,6 +251,8 @@ class NarwalClient:
                 rc, mid = client.subscribe(bt, qos=1)
                 _LOGGER.debug("Subscribed to broadcast: %s (rc=%s mid=%s)", bt, rc, mid)
             self._connected.set()
+            self.state.device_reachable = True
+            self._notify_state_update()
         else:
             _LOGGER.error("MQTT connection REJECTED: %s", reason_code)
 
@@ -296,6 +298,8 @@ class NarwalClient:
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         _LOGGER.warning("MQTT disconnected: %s", reason_code)
         self._connected.clear()
+        self.state.device_reachable = False
+        self._notify_state_update()
 
     def _notify_state_update(self):
         """Schedule a state update callback on the event loop (if available)."""
@@ -630,7 +634,14 @@ class NarwalClient:
             raise
 
     async def disconnect(self) -> None:
-        """Disconnect from MQTT broker."""
+        """Disconnect from MQTT broker.
+
+        Does NOT flip device_reachable / fire a notification: the only
+        callers are (a) planned reconnects, which call connect() right
+        after, and (b) HA unload, which is tearing entities down. For
+        unexpected broker-side disconnects, _on_disconnect still fires
+        and handles the availability change.
+        """
         client = self._client
         self._client = None
         self._connected.clear()

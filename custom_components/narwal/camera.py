@@ -19,7 +19,8 @@ from .narwal_client.models import parse_protobuf_fields
 _LOGGER = logging.getLogger(__name__)
 
 MAP_CACHE_SECONDS = 120
-MAP_FAILURE_COOLDOWN = 300
+MAP_FAILURE_COOLDOWN = 600  # 10 min — after a timeout, the vacuum is
+                            # usually mid-task and won't reply for a while.
 
 
 async def async_setup_entry(
@@ -56,25 +57,34 @@ class NarwalMapCamera(NarwalEntity, Camera):
         if not self.coordinator.client.connected:
             return self._last_image
 
+        # If the coordinator's status polls are already timing out, the
+        # vacuum is busy (mid-clean or asleep) and map/get_map will time
+        # out the same way — don't burn 15s on it.
+        if self.coordinator._consecutive_failures > 0:
+            return self._last_image
+
         now = time.monotonic()
         cooldown = MAP_CACHE_SECONDS if self._consecutive_map_failures == 0 else MAP_FAILURE_COOLDOWN
-        if now - self._last_fetch < cooldown and self._last_image is not None:
+        if self._last_fetch > 0.0 and now - self._last_fetch < cooldown:
             return self._last_image
+
+        # Set _last_fetch BEFORE awaiting get_map(). Multiple concurrent
+        # render requests would otherwise all see _last_fetch=0.0, all
+        # queue up a get_map() behind the per-command lock, and all time
+        # out one after the other every ~15s.
+        self._last_fetch = now
 
         try:
             resp = await self.coordinator.client.get_map()
-            self._last_fetch = now
         except Exception:
-            self._last_fetch = now
             self._consecutive_map_failures += 1
-            _LOGGER.debug(
-                "Map fetch failed (attempt %d)", self._consecutive_map_failures,
-                exc_info=True,
+            _LOGGER.warning(
+                "Map fetch failed (attempt %d, next try in %ds)",
+                self._consecutive_map_failures, MAP_FAILURE_COOLDOWN,
             )
             return self._last_image
 
         if not resp.data:
-            self._last_fetch = now
             return self._last_image
 
         try:

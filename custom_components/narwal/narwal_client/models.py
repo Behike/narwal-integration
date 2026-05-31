@@ -84,9 +84,10 @@ class NarwalState:
                 self.battery_level = float(val)
 
         # Field 3 = mode/state sub-message
+        sub: dict = {}
+        prev_status = self.working_status
         if 3 in fields and isinstance(fields[3], bytes):
             sub = parse_protobuf_fields(fields[3])
-            _LOGGER.debug("Base status sub-fields: %s", sub)
             if 1 in sub and isinstance(sub[1], int):
                 raw_status = sub[1]
                 
@@ -114,6 +115,19 @@ class NarwalState:
                     )
                     self.working_status = WorkingStatus.UNKNOWN
 
+                # Disambiguate raw_status=2: this firmware reuses the
+                # PAUSED slot for any active task. Captured payloads
+                # during scheduled clean: {1: 2, 4: 8/7/3} with no
+                # is_paused flag (sub[2]). Use the explicit flags:
+                #   sub[2] = is_paused  (1 = actually paused)
+                #   sub[7] = is_returning (1 = en route to dock)
+                # Without either flag set, treat as CLEANING.
+                if self.working_status == WorkingStatus.PAUSED:
+                    if sub.get(7, 0) == 1:
+                        self.working_status = WorkingStatus.RETURNING
+                    elif sub.get(2, 0) != 1:
+                        self.working_status = WorkingStatus.CLEANING
+
         # Derive boolean flags from working_status (always, not just when
         # field 3 is present) so they stay in sync even if field 3 parsing
         # fails due to protobuf format variations.
@@ -127,11 +141,12 @@ class NarwalState:
             WorkingStatus.CHARGING, WorkingStatus.MOP_WASHING,
             WorkingStatus.MOP_DRYING, WorkingStatus.DUST_COLLECTING,
         )
-        self.device_reachable = True
-        _LOGGER.info(
-            "State update: status=%s battery=%.1f%% cleaning=%s paused=%s returning=%s docked=%s",
-            self.working_status.name, self.battery_level,
-            self.is_cleaning, self.is_paused, self.is_returning, self.is_docked,
+        # Log state transitions at WARNING so we can diagnose enum
+        # mismapping without asking the user to change log levels.
+        log = _LOGGER.warning if self.working_status != prev_status else _LOGGER.debug
+        log(
+            "State update: status=%s battery=%.1f%% sub_fields=%s",
+            self.working_status.name, self.battery_level, sub,
         )
 
     rooms: list[RoomInfo] = field(default_factory=list)
@@ -147,10 +162,17 @@ class NarwalState:
         _LOGGER.debug("Parsed %d rooms from map data (field 12)", len(self.rooms))
 
     def update_working_status(self, payload: bytes) -> None:
-        """Update from working_status protobuf."""
+        """Update elapsed_time/cleaned_area from working_status protobuf.
+
+        This firmware keeps sending working_status pushes even after
+        cleaning ends and the vacuum returns to the dock (elapsed_time
+        stays frozen at the cycle's final value). The push presence is
+        therefore NOT a reliable "actively cleaning" signal — base_status
+        is authoritative for working_status enum, and is now resolved
+        correctly via update_base_status. Leave the enum alone here.
+        """
         fields = parse_protobuf_fields(payload)
         self.raw_working_status = fields
-        self.device_reachable = True
 
         if 3 in fields and isinstance(fields[3], int):
             self.elapsed_time = fields[3]

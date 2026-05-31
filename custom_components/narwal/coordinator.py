@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -20,6 +21,7 @@ from .const import (
     CONF_PRODUCT_KEY,
     CONF_REFRESH_TOKEN,
     CONF_REGION,
+    CONF_ROOMS_CACHE,
     CONF_USER_UUID,
     DOMAIN,
 )
@@ -32,11 +34,28 @@ from .narwal_client import (
     NarwalConnectionError,
     NarwalState,
 )
+from .narwal_client.const import WorkingStatus
+from .narwal_client.models import RoomInfo
 
 _LOGGER = logging.getLogger(__name__)
 
-POLL_INTERVAL = timedelta(seconds=60)
+POLL_INTERVAL_ACTIVE = timedelta(seconds=60)
+POLL_INTERVAL_IDLE = timedelta(minutes=5)
 MAX_CONSECUTIVE_FAILURES = 3
+
+# The active_robot_publish payload tells the vacuum keepalive=60_000ms.
+# If we don't re-register within that window the vacuum drops us from
+# its push-broadcast list and stops sending state updates. Send a
+# keepalive on its own timer (independent of the adaptive poll cadence,
+# which may be 5 min). 50s leaves a small safety margin.
+KEEPALIVE_INTERVAL = timedelta(seconds=50)
+
+IDLE_STATUSES = frozenset({
+    WorkingStatus.SLEEPING,
+    WorkingStatus.CHARGING,
+    WorkingStatus.DOCKED,
+    WorkingStatus.CHARGED,
+})
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -49,12 +68,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=POLL_INTERVAL,
+            update_interval=POLL_INTERVAL_ACTIVE,
         )
         self.config_entry = entry
         self._cloud: NarwalCloud | None = None
         self.selected_clean_mode: CleanMode = CleanMode.VACUUM_AND_MOP
         self._consecutive_failures: int = 0
+        self._keepalive_unsub = None
 
         if CONF_ACCESS_TOKEN in entry.data:
             self._setup_from_cloud_config(entry)
@@ -97,6 +117,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.client.product_key,
             self.client.broker,
         )
+
+        # Restore cached rooms before connecting so start_clean works
+        # even if the vacuum is asleep and we can't fetch a fresh map.
+        cached = self.config_entry.data.get(CONF_ROOMS_CACHE, [])
+        if cached:
+            self.client.state.rooms = [RoomInfo(**r) for r in cached]
+            _LOGGER.info("Restored %d rooms from cache", len(cached))
+
         if self._cloud:
             _LOGGER.info(
                 "Token expired=%s, refreshing to ensure valid MQTT credentials",
@@ -114,6 +142,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         try:
             await self.client.fetch_rooms()
+            self._persist_rooms_cache()
         except NarwalCommandError:
             _LOGGER.warning("Initial room fetch timed out — will retry on next poll")
 
@@ -126,6 +155,44 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         )
         self._consecutive_failures = 0
         self.async_set_updated_data(state)
+        self._start_keepalive()
+
+    def _persist_rooms_cache(self) -> None:
+        """Save the current room list to the config entry data."""
+        rooms = self.client.state.rooms
+        if not rooms:
+            return
+        cache = [
+            {
+                "room_id": r.room_id,
+                "room_sub_type": r.room_sub_type,
+                "name": r.name,
+                "category": r.category,
+                "instance_index": r.instance_index,
+            }
+            for r in rooms
+        ]
+        if self.config_entry.data.get(CONF_ROOMS_CACHE) == cache:
+            return
+        new_data = {**self.config_entry.data, CONF_ROOMS_CACHE: cache}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        _LOGGER.info("Cached %d rooms to config entry", len(rooms))
+
+    def _start_keepalive(self) -> None:
+        """Schedule notify_active every 50s to stay on the vacuum's push list."""
+        if self._keepalive_unsub is not None:
+            return
+        self._keepalive_unsub = async_track_time_interval(
+            self.hass, self._send_keepalive, KEEPALIVE_INTERVAL
+        )
+
+    async def _send_keepalive(self, _now=None) -> None:
+        if not self.client.connected:
+            return
+        try:
+            await self.client.notify_active()
+        except Exception:
+            _LOGGER.debug("keepalive notify_active failed", exc_info=True)
 
     async def _reauth(self) -> None:
         """Re-authenticate: try token refresh first, fall back to full login."""
@@ -168,7 +235,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         _LOGGER.info("Narwal access token updated")
 
     async def _reconnect_with_fresh_token(self) -> None:
-        """Full reconnect cycle: refresh token, disconnect, reconnect."""
+        """Full reconnect cycle: refresh token, disconnect, reconnect.
+
+        disconnect() no longer flips availability, so the entity stays
+        in its last-known state during the brief disconnect→connect
+        window. If reconnect fails outright, flip to unavailable here.
+        """
         _LOGGER.warning(
             "Forcing token refresh + reconnect after %d consecutive failures",
             self._consecutive_failures,
@@ -183,11 +255,34 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             _LOGGER.warning("Reconnected successfully with fresh token")
         except Exception:
             _LOGGER.error("Reconnect failed", exc_info=True)
+            self.client.state.device_reachable = False
+            self.async_set_updated_data(self.client.state)
 
     def _on_state_update(self, state: NarwalState) -> None:
         """Handle state updates from MQTT."""
         self._consecutive_failures = 0
+        self._adjust_poll_interval()
         self.async_set_updated_data(state)
+
+    def _adjust_poll_interval(self) -> None:
+        """Switch between active/idle poll cadence based on last-known status.
+
+        When the vacuum is docked/sleeping, polls just time out (the device
+        doesn't process commands in deep sleep), so we back off to reduce
+        radio traffic. Push broadcasts still arrive in real time when the
+        vacuum wakes, so we'll switch back to active cadence on next push.
+        """
+        new_interval = (
+            POLL_INTERVAL_IDLE
+            if self.client.state.working_status in IDLE_STATUSES
+            else POLL_INTERVAL_ACTIVE
+        )
+        if self.update_interval != new_interval:
+            _LOGGER.info(
+                "Poll interval -> %s (status=%s)",
+                new_interval, self.client.state.working_status.name,
+            )
+            self.update_interval = new_interval
 
     async def _async_update_data(self) -> NarwalState:
         """Poll for status (backup for push updates)."""
@@ -201,29 +296,44 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if needs_reconnect:
             await self._reconnect_with_fresh_token()
 
+        # Availability is driven by MQTT connection state (set in the
+        # client's connect/disconnect callbacks), not by command success.
+        # A vacuum in deep sleep is reachable-but-quiet, not unreachable.
+        # Failure tracking here only drives the periodic reconnect.
+        # notify_active is on its own 50s timer (_start_keepalive); no
+        # need to send it here.
+        status_ok = False
         if self.client.connected:
-            try:
-                await self.client.notify_active()
-            except Exception:
-                _LOGGER.debug("active_robot_publish failed", exc_info=True)
-
             try:
                 await self.client.request_status_update()
                 self._consecutive_failures = 0
+                status_ok = True
             except NarwalCommandError:
                 self._consecutive_failures += 1
-                self.client.state.device_reachable = False
                 _LOGGER.warning(
                     "Status poll failed (%d/%d before reconnect)",
                     self._consecutive_failures, MAX_CONSECUTIVE_FAILURES,
                 )
+
+            # Only retry the map fetch when the vacuum is actually responsive.
+            # Otherwise we just burn 15s of the poll cycle waiting for a
+            # second timeout the camera is already (politely) chasing too.
+            if status_ok and not self.client.state.rooms:
+                try:
+                    await self.client.fetch_rooms()
+                    self._persist_rooms_cache()
+                except NarwalCommandError:
+                    _LOGGER.debug("Room re-fetch still failing — will retry next poll")
         else:
             self._consecutive_failures += 1
-            self.client.state.device_reachable = False
             _LOGGER.warning("MQTT not connected, failure count: %d", self._consecutive_failures)
 
+        self._adjust_poll_interval()
         return self.client.state
 
     async def async_shutdown(self) -> None:
         """Disconnect MQTT."""
+        if self._keepalive_unsub is not None:
+            self._keepalive_unsub()
+            self._keepalive_unsub = None
         await self.client.disconnect()
