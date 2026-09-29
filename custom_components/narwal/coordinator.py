@@ -262,12 +262,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.async_set_updated_data(self.client.state)
 
     def _on_state_update(self, state: NarwalState) -> None:
-        """Handle state updates from MQTT.
-
-        Broadcasts don't reset _consecutive_failures: the robot keeps
-        pushing status even when our commands no longer get through, and
-        only a successful poll proves the command path works.
-        """
+        """Handle state updates from MQTT."""
+        self._consecutive_failures = 0
         self._adjust_poll_interval()
         self.async_set_updated_data(state)
 

@@ -603,7 +603,7 @@ class NarwalClient:
             await self.fetch_rooms()
             room_ids = [r.room_id for r in self.state.rooms]
         if not room_ids:
-            _LOGGER.warning("No rooms discovered, sending clean command without a room list")
+            raise NarwalCommandError("Cannot start clean: no rooms discovered")
 
         payload = self._build_clean_payload(room_ids, effective_mode, fan_level, mop_humidity)
         return await self.send_command(TOPIC_CMD_START_CLEAN, payload)
@@ -659,24 +659,13 @@ class NarwalClient:
         return await self.send_command(TOPIC_CMD_GET_CONSUMABLE)
 
     async def get_map(self) -> CommandResponse:
-        """Fetch the current map from the vacuum (for camera rendering).
-
-        Always uses map/get_map which returns the compressed pixel grid
-        in field 17 for both Ultra and Plus models.
-        """
-        extra = _make_protobuf_varint(1, 0) + _make_protobuf_varint(2, 0)
-        return await self.send_command(TOPIC_CMD_GET_MAP, extra_payload=extra, timeout=30.0)
+        """Fetch the current map from the vacuum."""
+        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
 
     async def fetch_rooms(self) -> None:
-        """Fetch the map and update the room list in self.state.
-
-        Uses map/get_all_reduced_maps for the Freo X Plus (richer room data)
-        and map/get_map for the Ultra.
-        """
+        """Fetch the map and update the room list in self.state."""
         try:
-            topic = TOPIC_CMD_GET_MAP
-            extra = _make_protobuf_varint(1, 0) + _make_protobuf_varint(2, 0)
-            resp = await self.send_command(topic, extra_payload=extra, timeout=15.0)
+            resp = await self.get_map()
             if resp.success and resp.data:
                 self.state.update_rooms_from_map(resp.data)
                 _LOGGER.info("Fetched %d rooms from map", len(self.state.rooms))
