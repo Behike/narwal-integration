@@ -48,6 +48,9 @@ class NarwalState:
     # the room currently being cleaned. None when unknown.
     progress: float | None = None
     current_room_id: int | None = None
+    # Freo X Plus: base_status field 34, only present while the robot
+    # reports a fault (the task then shows as paused). None = no error.
+    error_code: int | None = None
     device_reachable: bool = False
     # Freo X Plus firmware uses a different working-status enum layout;
     # set by NarwalClient from the product key.
@@ -120,6 +123,12 @@ class NarwalState:
                         self.working_status = WorkingStatus.RETURNING
                     elif sub.get(2, 0) != 1:
                         self.working_status = WorkingStatus.CLEANING
+
+        if self.freo_x_plus:
+            err = fields.get(34)
+            self.error_code = err if isinstance(err, int) and err else None
+            if self.error_code is not None:
+                self.working_status = WorkingStatus.ERROR
 
         # Derive boolean flags from working_status (always, not just when
         # field 3 is present) so they stay in sync even if field 3 parsing

@@ -104,6 +104,11 @@ class NarwalStatusSensor(NarwalEntity, SensorEntity):
             "is_paused": state.is_paused,
             "is_returning": state.is_returning,
             "is_docked": state.is_docked,
+            "error_code": state.error_code,
+            "raw_status": {
+                k: v for k, v in state.raw_base_status.items()
+                if isinstance(v, int)
+            },
         }
 
 
