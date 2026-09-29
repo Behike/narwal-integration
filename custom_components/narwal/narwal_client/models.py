@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import struct
 from dataclasses import dataclass, field
-from .const import ROOM_SUB_TYPE_NAMES, WorkingStatus
+from .const import ERROR_CODE_MESSAGES, ROOM_SUB_TYPE_NAMES, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +51,9 @@ class NarwalState:
     # Freo X Plus: base_status field 34, only present while the robot
     # reports a fault (the task then shows as paused). None = no error.
     error_code: int | None = None
+    # App error codes (10xx/11xx) if the robot sends them; not located in
+    # the protocol yet, so this stays empty until a capture shows where.
+    error_codes: list[int] = field(default_factory=list)
     device_reachable: bool = False
     # Freo X Plus firmware uses a different working-status enum layout;
     # set by NarwalClient from the product key.
@@ -127,8 +130,18 @@ class NarwalState:
         if self.freo_x_plus:
             err = fields.get(34)
             self.error_code = err if isinstance(err, int) and err else None
-            if self.error_code is not None:
+            self.error_codes = sorted(
+                _find_error_codes(fields.get(34)) | _find_error_codes(fields.get(25))
+            )
+            if self.error_code is not None or self.error_codes:
                 self.working_status = WorkingStatus.ERROR
+            if self.working_status == WorkingStatus.ERROR and prev_status != WorkingStatus.ERROR:
+                # Full payload once per fault, to locate the app error code.
+                _LOGGER.warning(
+                    "Robot fault: field34=%s codes=%s raw=%s",
+                    err, self.error_codes,
+                    {k: (v.hex() if isinstance(v, bytes) else v) for k, v in fields.items()},
+                )
 
         # Derive boolean flags from working_status (always, not just when
         # field 3 is present) so they stay in sync even if field 3 parsing
@@ -193,6 +206,22 @@ class NarwalState:
             self.current_room_id = sub.get(1) if isinstance(sub.get(1), int) else None
         elif 13 in fields and isinstance(fields[13], int):
             self.cleaned_area = fields[13]
+
+
+def _find_error_codes(value: object, depth: int = 0) -> set[int]:
+    """Collect known app error codes from a varint or nested sub-message."""
+    if isinstance(value, int):
+        return {value} if value in ERROR_CODE_MESSAGES else set()
+    if not isinstance(value, bytes) or not value or depth > 3:
+        return set()
+    found: set[int] = set()
+    try:
+        for vals in parse_protobuf_repeated(value).values():
+            for v in vals:
+                found |= _find_error_codes(v, depth + 1)
+    except (IndexError, ValueError):
+        pass
+    return found
 
 
 def _as_float32(raw: object) -> float | None:

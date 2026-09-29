@@ -17,6 +17,7 @@ from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
 from .narwal_client import WorkingStatus
+from .narwal_client.const import ERROR_CODE_MESSAGES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +106,10 @@ class NarwalStatusSensor(NarwalEntity, SensorEntity):
             "is_returning": state.is_returning,
             "is_docked": state.is_docked,
             "error_code": state.error_code,
+            "error_codes": state.error_codes,
+            "error_messages": [
+                ERROR_CODE_MESSAGES.get(c, f"Error {c}") for c in state.error_codes
+            ],
             "raw_status": {
                 k: v for k, v in state.raw_base_status.items()
                 if isinstance(v, int)
