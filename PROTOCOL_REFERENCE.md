@@ -735,6 +735,12 @@ Field 11 is a reliable dock indicator (2 = on the dock, 1 = off it).
 | `{1: N, 2: 1, ...}`   | Task N paused                            |
 | `{1: 10, 10: 1\|2}`   | Returning to dock (2 = docking manoeuvre) |
 
+Field 34 = 1 appears when the robot reports a fault (the task then shows
+as paused, e.g. `{1: 2, 2: 1, 4: 3}`), but also on the dock after a mop
+drying cycle (`{1: 1, 3: 5}` with field 11 = 2). The integration only
+treats it as an error while the robot is off the dock. The detailed app
+error codes (10xx/11xx) have not been located in the protocol yet.
+
 ### `clean/start_clean` payload
 
 ```

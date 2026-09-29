@@ -48,8 +48,8 @@ class NarwalState:
     # the room currently being cleaned. None when unknown.
     progress: float | None = None
     current_room_id: int | None = None
-    # Freo X Plus: base_status field 34, only present while the robot
-    # reports a fault (the task then shows as paused). None = no error.
+    # Freo X Plus: base_status field 34. Set during a fault (the task then
+    # shows as paused) but also on the dock after mop drying. None = unset.
     error_code: int | None = None
     # App error codes (10xx/11xx) if the robot sends them; not located in
     # the protocol yet, so this stays empty until a capture shows where.
@@ -133,7 +133,12 @@ class NarwalState:
             self.error_codes = sorted(
                 _find_error_codes(fields.get(34)) | _find_error_codes(fields.get(25))
             )
-            if self.error_code is not None or self.error_codes:
+            # Field 34 is also set on the dock after a mop drying cycle, so
+            # only treat it as a fault while the robot is off the dock.
+            on_dock = fields.get(11) == 2 or self.working_status in (
+                WorkingStatus.DOCKED, WorkingStatus.CHARGED,
+            )
+            if (self.error_code is not None or self.error_codes) and not on_dock:
                 self.working_status = WorkingStatus.ERROR
             if self.working_status == WorkingStatus.ERROR and prev_status != WorkingStatus.ERROR:
                 # Full payload once per fault, to locate the app error code.
