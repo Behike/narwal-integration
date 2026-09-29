@@ -45,12 +45,15 @@ class NarwalState:
     elapsed_time: int = 0
     cleaned_area: int = 0
     device_reachable: bool = False
+    # Freo X Plus firmware uses a different working-status enum layout;
+    # set by NarwalClient from the product key.
+    freo_x_plus: bool = False
 
     # Raw protobuf data for fields we don't fully decode yet
     raw_base_status: dict = field(default_factory=dict)
     raw_working_status: dict = field(default_factory=dict)
 
-    def update_base_status(self, payload: bytes, is_freo_x_plus: bool = False) -> None:
+    def update_base_status(self, payload: bytes) -> None:
         """Update from robot_base_status protobuf.
 
         The payload field layout (confirmed via captures):
@@ -90,22 +93,8 @@ class NarwalState:
             sub = parse_protobuf_fields(fields[3])
             if 1 in sub and isinstance(sub[1], int):
                 raw_status = sub[1]
-                
-                if is_freo_x_plus:
-                    # Translate Freo X Plus states to Freo X Ultra compatible WorkingStatus
-                    if raw_status == 2:
-                        if sub.get(2) == 1:
-                            raw_status = WorkingStatus.PAUSED.value
-                        else:
-                            raw_status = WorkingStatus.CLEANING.value
-                    elif raw_status == 10:
-                        raw_status = WorkingStatus.RETURNING.value
-                    elif raw_status == 1:
-                        if sub.get(3) in (1, 6):
-                            raw_status = WorkingStatus.DOCKED.value
-                        else:
-                            raw_status = WorkingStatus.STANDBY.value
-
+                if self.freo_x_plus:
+                    raw_status = _translate_freo_x_plus_status(raw_status, sub, fields)
                 try:
                     self.working_status = WorkingStatus(raw_status)
                 except ValueError:
@@ -122,7 +111,7 @@ class NarwalState:
                 #   sub[2] = is_paused  (1 = actually paused)
                 #   sub[7] = is_returning (1 = en route to dock)
                 # Without either flag set, treat as CLEANING.
-                if self.working_status == WorkingStatus.PAUSED:
+                if not self.freo_x_plus and self.working_status == WorkingStatus.PAUSED:
                     if sub.get(7, 0) == 1:
                         self.working_status = WorkingStatus.RETURNING
                     elif sub.get(2, 0) != 1:
@@ -178,6 +167,37 @@ class NarwalState:
             self.elapsed_time = fields[3]
         if 13 in fields and isinstance(fields[13], int):
             self.cleaned_area = fields[13]
+
+
+def _translate_freo_x_plus_status(raw_status: int, sub: dict, fields: dict) -> int:
+    """Map a Freo X Plus working-status value onto the Ultra WorkingStatus enum.
+
+    Captured on a Freo X Plus while driving it from the app
+    (sub = field 3 of robot_base_status, fields[11] = 2 on the dock / 1 off it):
+      {1: 1, 3: 1|6}        idle on the dock (1 right after docking)
+      {1: 1, 3: 2|5|7}      idle off the dock (task stopped / abandoned)
+      {1: 2, 4: 8|7|3}      vacuum task running (sub[4] = stage: 8 leaving
+                            the dock, 7 heading to the room, 3 cleaning)
+      {1: 2, 2: 1, 4: 3}    vacuum task paused
+      {1: 3, 5: 12|11|7}    mop task running (sub[5] = stage)
+      {1: 4, 7: 14|7}       vacuum-then-mop task running
+      {1: 5, 6: 12|11|7}    vacuum & mop task running
+      {1: 10, 10: 1|2}      returning to the dock (2 = docking manoeuvre)
+    The task stage lives in sub-field (status + 2), so sub[7] is NOT an
+    is_returning flag here; update_base_status skips the Ultra heuristics.
+    """
+    if raw_status == 1:
+        if sub.get(3) in (1, 6) or fields.get(11) == 2:
+            return WorkingStatus.DOCKED.value
+        return WorkingStatus.STANDBY.value
+    if raw_status in (2, 3, 4, 5):
+        if sub.get(2) == 1:
+            return WorkingStatus.PAUSED.value
+        return WorkingStatus.CLEANING.value
+    if raw_status == 10:
+        return WorkingStatus.RETURNING.value
+    return raw_status
+
 
 @dataclass
 class RoomInfo:

@@ -122,10 +122,16 @@ require the correct device_name.
 
 1. Subscribe to `{base_topic}/{command}/response` (QoS 1)
 2. Wait for SUBACK (timeout 5s)
-3. Publish to `{base_topic}/{command}` with MQTT5 properties:
+3. Publish to `{base_topic}/{command}` at **QoS 0** with MQTT5 properties:
    - `ResponseTopic`: the response topic string
    - `CorrelationData`: protobuf with request UUID, zero, and timestamp
 4. Wait for response on the response topic (timeout varies by command)
+
+**Publish at QoS 0.** The broker never sends PUBACK for app publishes. At
+QoS 1, paho-mqtt's in-flight window (20 messages) fills up after ~10 minutes
+of keepalives and polls, and every later publish is silently queued forever.
+Broadcasts keep arriving, so this looks exactly like the robot "sleeping".
+The official app publishes at QoS 0.
 
 ### Payload Framing (Narwal Frame)
 
@@ -134,7 +140,10 @@ All payloads use a custom framing: `0x01 + varint(inner_length) + inner_protobuf
 The inner protobuf always starts with the user identity:
 - Field 1 (string): user_uuid
 - Field 2 (string): user_uuid (duplicate for backward compat?)
-- Additional command-specific fields follow
+- Field 5 (sub-message): response routing, as sent by the app:
+  `{1: "<base_topic>/<command>/response", 2: "<request uuid1>"}`
+
+Command-specific parameters go OUTSIDE (after) the frame.
 
 ### Response Framing
 
@@ -704,7 +713,55 @@ Heading conversion: `degrees = math.degrees(heading_radians)`
 
 ---
 
-## 13. File Structure
+## 13. Freo X Plus (product key `3rIGshGNAj`)
+
+Captured from the Narwal app driving a Freo X Plus (firmware v01.05.01.10).
+Same topics and framing as the Ultra; the differences are below.
+
+### Working status (`robot_base_status` field 3)
+
+Field 3.1 is a different enum. The task stage lives in sub-field
+`status + 2`, so sub-field 7 is **not** an is_returning flag here.
+Field 11 is a reliable dock indicator (2 = on the dock, 1 = off it).
+
+| field 3 sub-message   | Meaning                                  |
+|-----------------------|------------------------------------------|
+| `{1: 1, 3: 1\|6}`     | Idle on the dock (1 right after docking) |
+| `{1: 1, 3: 2\|5\|7}`  | Idle off the dock (task stopped)         |
+| `{1: 2, 4: 8\|7\|3}`  | Vacuum task (stage 8 leaving dock, 3 cleaning) |
+| `{1: 3, 5: 12\|11\|7}`| Mop task                                 |
+| `{1: 4, 7: 14\|7}`    | Vacuum-then-mop task                     |
+| `{1: 5, 6: 12\|11\|7}`| Vacuum & mop task                        |
+| `{1: N, 2: 1, ...}`   | Task N paused                            |
+| `{1: 10, 10: 1\|2}`   | Returning to dock (2 = docking manoeuvre) |
+
+### `clean/start_clean` payload
+
+```
+field 1 {
+  1: 1
+  2: {
+    1: {1: 3}                   // whole house, OR per room: {1: 1, 2: room_id}
+    2: {settings}               // repeated after each room entry
+    3: 0
+  }
+  3: {1: 1 for Vacuum & Mop else 0, 5: 0}
+  5: app mode   // 1 vacuum, 2 mop, 3 vacuum then mop, 4 vacuum & mop
+}
+settings = {1: task mode (2 vacuum, 3 mop, 4 vacuum & mop, 5 vacuum then mop),
+            2: suction (2 Quiet, 3 Normal, 4 Strong, 5 Super powerful — 1 is ignored),
+            3: 1,
+            4: mop humidity (1 Slightly dry, 2 Standard, 3 Slightly wet),
+            5..10: per-mode constants}
+```
+
+`_build_clean_payload_freo_x_plus()` reproduces the app's payloads byte for byte.
+
+### `task/force_end`
+
+The app appends `{2: b"\x01\x02"}` after the frame.
+
+## 14. File Structure
 
 ```
 custom_components/narwal/

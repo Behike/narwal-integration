@@ -14,10 +14,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
-from .const import CLEAN_MODE_MAP, FAN_SPEED_LIST, FAN_SPEED_MAP
+from .const import CLEAN_MODE_MAP, FAN_SPEED_LIST, FAN_SPEED_MAP, FAN_SPEED_REVERSE
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import CleanMode, NarwalCommandError, WorkingStatus
+from .narwal_client import CleanMode, FanLevel, NarwalCommandError, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,7 +70,6 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
     def __init__(self, coordinator: NarwalCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.config_entry.data['device_name']}_vacuum"
-        self._last_fan_speed: str | None = None
 
     @property
     def available(self) -> bool:
@@ -89,7 +88,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
 
     @property
     def fan_speed(self) -> str | None:
-        return self._last_fan_speed
+        return FAN_SPEED_REVERSE.get(self.coordinator.selected_fan_level)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -109,7 +108,11 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
                 _LOGGER.warning("Resume returned code=%s", resp.result_code)
         else:
             mode = self.coordinator.selected_clean_mode
-            resp = await self.coordinator.client.start_plan(mode=mode)
+            resp = await self.coordinator.client.start_plan(
+                mode=mode,
+                fan_level=self.coordinator.selected_fan_level,
+                mop_humidity=self.coordinator.selected_mop_humidity,
+            )
             if not resp.success:
                 _LOGGER.warning(
                     "Start returned code=%s (mode=%s, status=%s)",
@@ -136,12 +139,18 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         await self.coordinator.client.locate()
 
     async def async_set_fan_speed(self, fan_speed: str, **kwargs: Any) -> None:
-        from .narwal_client import FanLevel
         level = FAN_SPEED_MAP.get(fan_speed)
-        if level is not None:
-            await self.coordinator.client.set_fan_speed(FanLevel(level))
-            self._last_fan_speed = fan_speed
-            self.async_write_ha_state()
+        if level is None:
+            return
+        # Used for the next start; also pushed live if a clean is running.
+        self.coordinator.selected_fan_level = FanLevel(level)
+        self.async_write_ha_state()
+        state = self.coordinator.data
+        if state and state.is_cleaning:
+            try:
+                await self.coordinator.client.set_fan_speed(FanLevel(level))
+            except NarwalCommandError:
+                _LOGGER.warning("Live fan speed change not acknowledged")
 
     async def async_send_command(
         self, command: str, params: dict[str, Any] | list[Any] | None = None, **kwargs: Any,
@@ -179,7 +188,9 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
                 state.working_status.name if state else "unknown",
             )
             resp = await self.coordinator.client.start_plan(
-                mode=mode, room_ids=room_ids
+                mode=mode, room_ids=room_ids,
+                fan_level=self.coordinator.selected_fan_level,
+                mop_humidity=self.coordinator.selected_mop_humidity,
             )
             if not resp.success:
                 _LOGGER.warning(

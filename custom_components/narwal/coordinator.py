@@ -27,6 +27,8 @@ from .const import (
 )
 from .narwal_client import (
     CleanMode,
+    FanLevel,
+    MopHumidity,
     NarwalClient,
     NarwalCloud,
     NarwalCloudError,
@@ -46,9 +48,8 @@ MAX_CONSECUTIVE_FAILURES = 3
 # The active_robot_publish payload tells the vacuum keepalive=60_000ms.
 # If we don't re-register within that window the vacuum drops us from
 # its push-broadcast list and stops sending state updates. Send a
-# keepalive on its own timer (independent of the adaptive poll cadence,
-# which may be 5 min). 50s leaves a small safety margin.
-KEEPALIVE_INTERVAL = timedelta(seconds=50)
+# keepalive every 30 seconds to match the official app.
+KEEPALIVE_INTERVAL = timedelta(seconds=30)
 
 IDLE_STATUSES = frozenset({
     WorkingStatus.SLEEPING,
@@ -73,6 +74,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.config_entry = entry
         self._cloud: NarwalCloud | None = None
         self.selected_clean_mode: CleanMode = CleanMode.VACUUM_AND_MOP
+        self.selected_fan_level: FanLevel = FanLevel.NORMAL
+        self.selected_mop_humidity: MopHumidity = MopHumidity.NORMAL
         self._consecutive_failures: int = 0
         self._keepalive_unsub = None
 
@@ -259,8 +262,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.async_set_updated_data(self.client.state)
 
     def _on_state_update(self, state: NarwalState) -> None:
-        """Handle state updates from MQTT."""
-        self._consecutive_failures = 0
+        """Handle state updates from MQTT.
+
+        Broadcasts don't reset _consecutive_failures: the robot keeps
+        pushing status even when our commands no longer get through, and
+        only a successful poll proves the command path works.
+        """
         self._adjust_poll_interval()
         self.async_set_updated_data(state)
 

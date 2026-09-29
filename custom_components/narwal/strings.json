@@ -57,6 +57,14 @@
       "map": {
         "name": "Map"
       }
+    },
+    "select": {
+      "clean_mode": {
+        "name": "Clean Mode"
+      },
+      "mop_humidity": {
+        "name": "Mop Humidity"
+      }
     }
   }
 }

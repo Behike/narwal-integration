@@ -70,6 +70,10 @@ The JWT access token (used as MQTT password) expires. The broker may silently st
 - `status/robot_base_status` — contains `WorkingStatus` enum, battery, boolean flags (`is_cleaning`, `is_paused`, `is_returning`, `is_docked`). Sent as push broadcast AND as command response to `status/get_device_base_status`.
 - `status/working_status` — contains ONLY `elapsed_time` (field 3) and `cleaned_area` (field 13). Does NOT contain `WorkingStatus` enum. Sent only during active cleaning.
 
+### Publish at QoS 0
+
+The broker never PUBACKs app publishes. At QoS 1 paho's 20-message in-flight window fills after ~10 min and every later command is silently queued (looks like deep sleep). Always publish commands at QoS 0, like the app. The app also puts the response routing inside the frame (field 5 = {1: response_topic, 2: request_id}); keep doing the same.
+
 ### Explicit subscriptions only
 
 Narwal's Aliyun IoT broker accepts wildcard subscriptions (e.g. `base_topic/#`) but does NOT route messages through them — only EXPLICIT topic subscriptions get messages delivered.

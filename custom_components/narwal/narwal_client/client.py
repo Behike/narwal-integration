@@ -18,6 +18,7 @@ from .const import (
     COMMAND_RESPONSE_TIMEOUT,
     MQTT_BROKER,
     MQTT_PORT,
+    PRODUCT_KEY_FREO_X_PLUS,
     TOPIC_CMD_ACTIVE_ROBOT,
     TOPIC_CMD_EASY_CLEAN,
     TOPIC_CMD_FORCE_END,
@@ -93,7 +94,7 @@ class NarwalClient:
         self.broker = broker
         self.port = port
 
-        self.state = NarwalState()
+        self.state = NarwalState(freo_x_plus=self.is_freo_x_plus)
         self.on_state_update: Callable[[NarwalState], None] | None = None
 
         self._mqtt_username = mqtt_username
@@ -119,22 +120,30 @@ class NarwalClient:
 
     @property
     def is_freo_x_plus(self) -> bool:
-        return self.product_key == "3rIGshGNAj"
+        return self.product_key == PRODUCT_KEY_FREO_X_PLUS
 
     @property
     def connected(self) -> bool:
         return self._connected.is_set()
 
-    def _build_user_payload(self, extra_inner: bytes = b"") -> bytes:
+    def _build_user_payload(self, response_topic: str, request_id: str) -> bytes:
         """Build the user auth protobuf wrapped in Narwal frame (0x01 + length + protobuf).
 
-        extra_inner is appended INSIDE the 0x01 frame (after the user UUID fields)
-        so the vacuum parses them as part of the same message.
+        Besides the user UUID (fields 1 and 2), the app puts the response
+        routing INSIDE the frame as field 5 = {1: response_topic, 2: request_id}.
+        The robot replies to that topic; when it is missing, the robot only
+        answers while it is fully awake (it ignores the MQTT5 ResponseTopic
+        property once it dozes off, ~10 min after the last app activity).
         """
-        inner = b""
-        inner += _make_protobuf_string(1, self.user_uuid)
-        inner += _make_protobuf_string(2, self.user_uuid)
-        inner += extra_inner
+        routing = (
+            _make_protobuf_string(1, response_topic)
+            + _make_protobuf_string(2, request_id)
+        )
+        inner = (
+            _make_protobuf_string(1, self.user_uuid)
+            + _make_protobuf_string(2, self.user_uuid)
+            + _make_protobuf_string(5, routing)
+        )
         return b'\x01' + _encode_varint(len(inner)) + inner
 
     def _build_publish_properties(self, topic: str, request_id: str) -> Properties:
@@ -268,32 +277,33 @@ class NarwalClient:
 
     def _on_message(self, client, userdata, msg):
         """Handle all incoming messages: command responses and broadcasts."""
-        topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
-        _LOGGER.debug(
-            "MQTT << %s (%d bytes) pending=%s",
-            topic_suffix, len(msg.payload),
-            list(self._pending_responses.keys()),
-        )
-
-        # Check for pending command response
-        if msg.topic in self._pending_responses:
-            event, holder = self._pending_responses.pop(msg.topic)
-            holder[0] = msg.payload
-            event.set()
-            return
-
-        # Handle status broadcasts
-        payload = self._extract_app_payload(msg.payload)
-
-        if topic_suffix == "status/robot_base_status":
-            self.state.update_base_status(
-                payload, 
-                is_freo_x_plus=self.is_freo_x_plus
+        try:
+            topic_suffix = msg.topic.replace(self.base_topic, "").lstrip("/")
+            _LOGGER.debug(
+                "MQTT << %s (%d bytes) pending=%s",
+                topic_suffix, len(msg.payload),
+                list(self._pending_responses.keys()),
             )
-            self._notify_state_update()
-        elif topic_suffix == "status/working_status":
-            self.state.update_working_status(payload)
-            self._notify_state_update()
+
+            # Check for pending command response
+            if msg.topic in self._pending_responses:
+                event, holder = self._pending_responses.pop(msg.topic)
+                holder[0] = msg.payload
+                event.set()
+                return
+
+            # Handle status broadcasts
+            payload = self._extract_app_payload(msg.payload)
+
+            if topic_suffix == "status/robot_base_status":
+                self.state.update_base_status(payload)
+                self._notify_state_update()
+            elif topic_suffix == "status/working_status":
+                self.state.update_working_status(payload)
+                self._notify_state_update()
+                
+        except Exception:
+            _LOGGER.exception("Unhandled error processing MQTT message on topic %s", msg.topic)
 
     def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
         _LOGGER.warning("MQTT disconnected: %s", reason_code)
@@ -316,9 +326,10 @@ class NarwalClient:
         command: str,
         extra_payload: bytes = b"",
         timeout: float = COMMAND_RESPONSE_TIMEOUT,
-        payload_override: bytes | None = None,
     ) -> CommandResponse:
         """Send a command and wait for response.
+
+        extra_payload is appended OUTSIDE (after) the Narwal auth frame.
 
         The entire publish-and-wait runs in an executor thread using
         threading.Event + message_callback_add, avoiding cross-thread
@@ -329,7 +340,7 @@ class NarwalClient:
 
         loop = self._loop or asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, self._send_command_blocking, command, extra_payload, timeout, payload_override
+            None, self._send_command_blocking, command, extra_payload, timeout
         )
 
     def _get_command_lock(self, command: str) -> threading.Lock:
@@ -340,7 +351,6 @@ class NarwalClient:
 
     def _send_command_blocking(
         self, command: str, extra_payload: bytes, timeout: float,
-        payload_override: bytes | None = None,
     ) -> CommandResponse:
         """Publish a command and block until the response arrives (runs in executor).
 
@@ -350,37 +360,40 @@ class NarwalClient:
         """
         lock = self._get_command_lock(command)
         with lock:
-            return self._send_command_locked(command, extra_payload, timeout, payload_override)
+            return self._send_command_locked(command, extra_payload, timeout)
 
     def _send_command_locked(
         self, command: str, extra_payload: bytes, timeout: float,
-        payload_override: bytes | None = None,
     ) -> CommandResponse:
         topic = f"{self.base_topic}/{command}"
         response_topic = f"{topic}/response"
         request_id = str(uuid.uuid1())
 
-        # Narwal's Aliyun IoT broker only routes messages to explicit
-        # subscriptions — the wildcard doesn't deliver.  Subscribe to
-        # the specific response topic and wait briefly for SUBACK.
+        suback_event = threading.Event()
         rc_sub, mid_sub = self._client.subscribe(response_topic, qos=1)
         _LOGGER.debug(
             "Subscribed to %s (rc=%s mid=%s)", response_topic, rc_sub, mid_sub,
         )
-        if rc_sub != 0:
+        if rc_sub == 0:
+            self._pending_subacks[mid_sub] = suback_event
+            if not suback_event.wait(timeout=5.0):
+                _LOGGER.warning("Timeout waiting for SUBACK on %s", response_topic)
+                self._pending_subacks.pop(mid_sub, None)
+        else:
             _LOGGER.error("Subscribe FAILED for %s: rc=%s", response_topic, rc_sub)
-        time.sleep(0.5)
+            time.sleep(0.5)
 
         response_event = threading.Event()
         response_holder: list[bytes | None] = [None]
         self._pending_responses[response_topic] = (response_event, response_holder)
 
         props = self._build_publish_properties(topic, request_id)
-        if payload_override is not None:
-            payload = payload_override
-        else:
-            payload = self._build_user_payload() + extra_payload
-        result = self._client.publish(topic, payload, qos=1, properties=props)
+        payload = self._build_user_payload(response_topic, request_id) + extra_payload
+        # QoS 0 like the official app: the Narwal broker never PUBACKs app
+        # publishes, so at QoS 1 paho's in-flight window (20 messages) fills
+        # up after ~10 min of keepalives/polls and every later command is
+        # silently queued forever — which looked like the robot "sleeping".
+        result = self._client.publish(topic, payload, qos=0, properties=props)
         _LOGGER.debug(
             "Published >> %s | response_topic=%s | rc=%s mid=%s",
             command, response_topic, result.rc, result.mid,
@@ -398,7 +411,6 @@ class NarwalClient:
         self,
         command: str,
         extra_payload: bytes = b"",
-        payload_override: bytes | None = None,
     ) -> None:
         """Send a command without waiting for a response."""
         if not self._client or not self.connected:
@@ -407,16 +419,13 @@ class NarwalClient:
         topic = f"{self.base_topic}/{command}"
         request_id = str(uuid.uuid1())
         props = self._build_publish_properties(topic, request_id)
-        if payload_override is not None:
-            payload = payload_override
-        else:
-            payload = self._build_user_payload() + extra_payload
-        self._client.publish(topic, payload, qos=1, properties=props)
+        payload = self._build_user_payload(f"{topic}/response", request_id) + extra_payload
+        self._client.publish(topic, payload, qos=0, properties=props)
 
     # --- High-level commands ---
 
     def _build_active_robot_payload(self) -> bytes:
-        """Build active_robot_publish payload matching the Narwal app format.
+        """Build the active_robot_publish parameters (sent after the auth frame).
 
         The app sends keepalive parameters OUTSIDE the Narwal auth frame:
           field 1 (sub-msg): {1:2000, 2:2000, 3:2000}  — push intervals (ms)
@@ -435,14 +444,13 @@ class NarwalClient:
             + _make_protobuf_varint(2, 60000)
             + _make_protobuf_varint(3, 0)
         )
-        return self._build_user_payload() + extra
+        return extra
 
     async def notify_active(self) -> None:
         """Announce this client to the vacuum, triggering push status broadcasts."""
         try:
-            payload = self._build_active_robot_payload()
             await self.send_command_no_response(
-                TOPIC_CMD_ACTIVE_ROBOT, payload_override=payload,
+                TOPIC_CMD_ACTIVE_ROBOT, self._build_active_robot_payload(),
             )
             _LOGGER.info("Sent active_robot notification")
         except Exception:
@@ -459,10 +467,7 @@ class NarwalClient:
         mop_humidity: MopHumidity = MopHumidity.NORMAL,
         passes: int = 2,
     ) -> bytes:
-        """Build a clean/start_clean payload matching the Narwal app format.
-
-        The Narwal frame (auth) comes first, then a clean configuration
-        protobuf is appended OUTSIDE the frame.
+        """Build the clean/start_clean configuration (sent after the auth frame).
 
         The room_id goes in the global config (field 1, sub-field 2),
         NOT in the room entry. The room entry contains cleaning parameters
@@ -499,8 +504,68 @@ class NarwalClient:
             + _make_protobuf_varint(5, 1)
         )
 
-        frame = self._build_user_payload()
-        return frame + _make_protobuf_string(1, clean_config)
+        return _make_protobuf_string(1, clean_config)
+
+    def _build_clean_payload_freo_x_plus(
+        self,
+        room_ids: list[int],
+        mode: CleanMode = CleanMode.VACUUM_AND_MOP,
+        fan_level: FanLevel = FanLevel.NORMAL,
+        mop_humidity: MopHumidity = MopHumidity.NORMAL,
+    ) -> bytes:
+        """Build the Freo X Plus clean/start_clean configuration.
+
+        Captured from the Narwal app (fields relative to the outer field 1):
+          1: 1
+          2: {                                   task
+               1: {1: 3}                         whole house, or
+               1: {1: 1, 2: room_id}             one entry per room ...
+               2: {settings}                     ... each followed by settings
+               3: 0
+             }
+          3: {1: 1 for Vacuum & Mop else 0, 5: 0}
+          5: app mode (1 vacuum, 2 mop, 3 vacuum then mop, 4 vacuum & mop)
+        settings = {1: mode, 2: suction (2 quiet .. 5 super powerful), 3: 1,
+                    4: mop humidity (1 slightly dry, 2 standard, 3 slightly wet),
+                    5..10: per-mode constants copied from the app}
+        """
+        # (settings[1], app mode, settings 5-10) per CleanMode
+        templates = {
+            CleanMode.VACUUM_AND_MOP: (4, 4, [(5, 1), (6, 1), (7, 1), (8, 1), (9, 1)]),
+            CleanMode.VACUUM_ONLY: (2, 1, [(5, 1), (6, 1), (7, 1), (8, 1), (9, 0), (10, 0)]),
+            CleanMode.MOP_ONLY: (3, 2, [(5, 1), (6, 1), (7, 1), (8, 1), (9, 0)]),
+            CleanMode.VACUUM_THEN_MOP: (5, 3, [(5, 2), (6, 2), (7, 1), (8, 2), (9, 0), (10, 0)]),
+        }
+        task_mode, app_mode, tail = templates[mode]
+        settings = (
+            _make_protobuf_varint(1, task_mode)
+            + _make_protobuf_varint(2, fan_level.value + 2)
+            + _make_protobuf_varint(3, 1)
+            + _make_protobuf_varint(4, mop_humidity.value + 1)
+            + b"".join(_make_protobuf_varint(f, v) for f, v in tail)
+        )
+
+        task = b""
+        if room_ids:
+            for rid in room_ids:
+                scope = _make_protobuf_varint(1, 1) + _make_protobuf_varint(2, rid)
+                task += _make_protobuf_string(1, scope) + _make_protobuf_string(2, settings)
+        else:
+            task += _make_protobuf_string(1, _make_protobuf_varint(1, 3))
+            task += _make_protobuf_string(2, settings)
+        task += _make_protobuf_varint(3, 0)
+
+        clean_config = (
+            _make_protobuf_varint(1, 1)
+            + _make_protobuf_string(2, task)
+            + _make_protobuf_string(
+                3,
+                _make_protobuf_varint(1, 1 if mode == CleanMode.VACUUM_AND_MOP else 0)
+                + _make_protobuf_varint(5, 0),
+            )
+            + _make_protobuf_varint(5, app_mode)
+        )
+        return _make_protobuf_string(1, clean_config)
 
     async def start(self) -> CommandResponse:
         return await self.start_clean()
@@ -524,25 +589,37 @@ class NarwalClient:
 
         await self.notify_active()
 
+        if self.is_freo_x_plus:
+            # No room list = whole house, exactly like the app does.
+            payload = self._build_clean_payload_freo_x_plus(
+                room_ids or [], effective_mode, fan_level, mop_humidity,
+            )
+            return await self.send_command(TOPIC_CMD_START_CLEAN, payload)
+
         if not room_ids:
-            room_ids = [r.room_id for r in self.state.rooms] if self.state.rooms else []
+            room_ids = [r.room_id for r in self.state.rooms]
         if not room_ids:
             _LOGGER.warning("No room IDs available — fetching map first")
             await self.fetch_rooms()
-            room_ids = [r.room_id for r in self.state.rooms] if self.state.rooms else []
+            room_ids = [r.room_id for r in self.state.rooms]
         if not room_ids:
-            raise NarwalCommandError("Cannot start clean: no rooms discovered")
+            _LOGGER.warning("No rooms discovered, sending clean command without a room list")
 
         payload = self._build_clean_payload(room_ids, effective_mode, fan_level, mop_humidity)
-        return await self.send_command(TOPIC_CMD_START_CLEAN, payload_override=payload)
+        return await self.send_command(TOPIC_CMD_START_CLEAN, payload)
 
     async def start_plan(
         self,
         mode: CleanMode | None = None,
         room_ids: list[int] | None = None,
+        fan_level: FanLevel = FanLevel.NORMAL,
+        mop_humidity: MopHumidity = MopHumidity.NORMAL,
     ) -> CommandResponse:
         """Start a cleaning plan — delegates to start_clean."""
-        return await self.start_clean(mode=mode, room_ids=room_ids)
+        return await self.start_clean(
+            mode=mode, room_ids=room_ids,
+            fan_level=fan_level, mop_humidity=mop_humidity,
+        )
 
     async def easy_clean(self) -> CommandResponse:
         return await self.start_clean()
@@ -554,7 +631,9 @@ class NarwalClient:
         return await self.send_command(TOPIC_CMD_RESUME)
 
     async def stop(self) -> CommandResponse:
-        return await self.send_command(TOPIC_CMD_FORCE_END)
+        # The app sends {2: b"\x01\x02"} after the frame; harmless on the Ultra.
+        extra = _make_protobuf_string(2, b"\x01\x02") if self.is_freo_x_plus else b""
+        return await self.send_command(TOPIC_CMD_FORCE_END, extra)
 
     async def return_to_base(self) -> CommandResponse:
         return await self.send_command(TOPIC_CMD_RECALL)
@@ -585,7 +664,8 @@ class NarwalClient:
         Always uses map/get_map which returns the compressed pixel grid
         in field 17 for both Ultra and Plus models.
         """
-        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
+        extra = _make_protobuf_varint(1, 0) + _make_protobuf_varint(2, 0)
+        return await self.send_command(TOPIC_CMD_GET_MAP, extra_payload=extra, timeout=30.0)
 
     async def fetch_rooms(self) -> None:
         """Fetch the map and update the room list in self.state.
@@ -594,8 +674,9 @@ class NarwalClient:
         and map/get_map for the Ultra.
         """
         try:
-            topic = "map/get_all_reduced_maps" if self.is_freo_x_plus else TOPIC_CMD_GET_MAP
-            resp = await self.send_command(topic, timeout=15.0)
+            topic = TOPIC_CMD_GET_MAP
+            extra = _make_protobuf_varint(1, 0) + _make_protobuf_varint(2, 0)
+            resp = await self.send_command(topic, extra_payload=extra, timeout=15.0)
             if resp.success and resp.data:
                 self.state.update_rooms_from_map(resp.data)
                 _LOGGER.info("Fetched %d rooms from map", len(self.state.rooms))

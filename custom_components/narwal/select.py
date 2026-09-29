@@ -9,10 +9,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
-from .const import CLEAN_MODE_LIST, CLEAN_MODE_MAP
+from .const import (
+    CLEAN_MODE_LIST,
+    CLEAN_MODE_MAP,
+    MOP_HUMIDITY_LIST,
+    MOP_HUMIDITY_MAP,
+)
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import CleanMode
+from .narwal_client import CleanMode, MopHumidity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,7 +29,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up Narwal select entities."""
     coordinator = entry.runtime_data
-    async_add_entities([NarwalCleanModeSelect(coordinator)])
+    async_add_entities([
+        NarwalCleanModeSelect(coordinator),
+        NarwalMopHumiditySelect(coordinator),
+    ])
 
 
 class NarwalCleanModeSelect(NarwalEntity, SelectEntity):
@@ -46,4 +54,26 @@ class NarwalCleanModeSelect(NarwalEntity, SelectEntity):
         val = CLEAN_MODE_MAP.get(option)
         if val is not None:
             self.coordinator.selected_clean_mode = CleanMode(val)
+        self.async_write_ha_state()
+
+
+class NarwalMopHumiditySelect(NarwalEntity, SelectEntity):
+    """Mop wetness used for the next clean that involves mopping."""
+
+    _attr_translation_key = "mop_humidity"
+    _attr_icon = "mdi:water-percent"
+    _attr_options = MOP_HUMIDITY_LIST
+
+    def __init__(self, coordinator: NarwalCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.config_entry.data['device_name']}_mop_humidity"
+        )
+        self._attr_current_option = MOP_HUMIDITY_LIST[1]
+
+    async def async_select_option(self, option: str) -> None:
+        self._attr_current_option = option
+        val = MOP_HUMIDITY_MAP.get(option)
+        if val is not None:
+            self.coordinator.selected_mop_humidity = MopHumidity(val)
         self.async_write_ha_state()

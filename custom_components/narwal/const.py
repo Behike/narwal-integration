@@ -54,3 +54,10 @@ CLEAN_MODE_MAP = {
     "Mop Only": 4,
 }
 CLEAN_MODE_REVERSE = {v: k for k, v in CLEAN_MODE_MAP.items()}
+
+MOP_HUMIDITY_LIST = ["Slightly dry", "Standard", "Slightly wet"]
+MOP_HUMIDITY_MAP = {
+    "Slightly dry": 0,
+    "Standard": 1,
+    "Slightly wet": 2,
+}
