@@ -52,7 +52,7 @@ async def async_setup_entry(
         NarwalStatusSensor(coordinator),
         NarwalElapsedTimeSensor(coordinator),
         NarwalCleanedAreaSensor(coordinator),
-    ])
+    ] + ([NarwalProgressSensor(coordinator)] if coordinator.client.is_freo_x_plus else []))
 
 
 class NarwalBatterySensor(NarwalEntity, SensorEntity):
@@ -145,3 +145,34 @@ class NarwalCleanedAreaSensor(NarwalEntity, SensorEntity):
         if state is None:
             return None
         return state.cleaned_area / 10000.0  # cm² to m²
+
+
+class NarwalProgressSensor(NarwalEntity, SensorEntity):
+    """Progress of the current cleaning task (Freo X Plus)."""
+
+    _attr_translation_key = "progress"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_icon = "mdi:progress-helper"
+
+    def __init__(self, coordinator: NarwalCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.config_entry.data['device_name']}_progress"
+
+    @property
+    def native_value(self) -> float | None:
+        state = self.coordinator.data
+        if state is None or state.progress is None:
+            return None
+        return max(0.0, min(100.0, state.progress))
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        state = self.coordinator.data
+        if state is None or state.current_room_id is None:
+            return {}
+        names = {r.room_id: r.display_name for r in state.rooms}
+        return {
+            "current_room_id": state.current_room_id,
+            "current_room": names.get(state.current_room_id),
+        }

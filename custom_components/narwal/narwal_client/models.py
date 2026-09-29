@@ -44,6 +44,10 @@ class NarwalState:
     is_docked: bool = False
     elapsed_time: int = 0
     cleaned_area: int = 0
+    # Freo X Plus only (working_status push): task progress in percent and
+    # the room currently being cleaned. None when unknown.
+    progress: float | None = None
+    current_room_id: int | None = None
     device_reachable: bool = False
     # Freo X Plus firmware uses a different working-status enum layout;
     # set by NarwalClient from the product key.
@@ -165,8 +169,28 @@ class NarwalState:
 
         if 3 in fields and isinstance(fields[3], int):
             self.elapsed_time = fields[3]
-        if 13 in fields and isinstance(fields[13], int):
+
+        if self.freo_x_plus:
+            # Freo X Plus layout (captured):
+            #   1 (float32) progress %, 2 (float32) cleaned area m²,
+            #   3 elapsed s, 5 {1: current room id}; 11/13/15 are constants
+            #   (2700 / 18000 / 600), so field 13 is NOT the cleaned area.
+            # Fields 1 and 2 only appear once the robot reaches the first
+            # room; a new task restarts without them.
+            self.progress = _as_float32(fields.get(1)) or 0.0
+            self.cleaned_area = round((_as_float32(fields.get(2)) or 0.0) * 10000)
+            room = fields.get(5)
+            sub = parse_protobuf_fields(room) if isinstance(room, bytes) else {}
+            self.current_room_id = sub.get(1) if isinstance(sub.get(1), int) else None
+        elif 13 in fields and isinstance(fields[13], int):
             self.cleaned_area = fields[13]
+
+
+def _as_float32(raw: object) -> float | None:
+    """Reinterpret a fixed32 field (parsed as int) as an IEEE 754 float."""
+    if not isinstance(raw, int):
+        return None
+    return round(struct.unpack("<f", struct.pack("<I", raw & 0xFFFFFFFF))[0], 2)
 
 
 def _translate_freo_x_plus_status(raw_status: int, sub: dict, fields: dict) -> int:

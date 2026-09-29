@@ -46,6 +46,9 @@
       },
       "cleaned_area": {
         "name": "Cleaned Area (Session)"
+      },
+      "progress": {
+        "name": "Cleaning Progress"
       }
     },
     "button": {
