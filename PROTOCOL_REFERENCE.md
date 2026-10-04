@@ -743,6 +743,12 @@ paused (`{1: N, 2: 1, ...}`) with field 1 empty again, so the integration
 keeps the fault until the task resumes or ends. These internal codes are
 not the 10xx/11xx codes shown by the app.
 
+| Code         | Cause (field 1.3)                               | App message          |
+|--------------|-------------------------------------------------|----------------------|
+| `0x02020030` | robot right side brush is abnormal when sweeping | Side brush error    |
+| `0x02020042` | right mop uninstall when mopping                 | Mop missing         |
+| `0x02310031` | robot hangs up in the air                        | The robot is suspended |
+
 Field 34 = 1 is not a fault flag: it shows up on the dock and during a
 normal vacuum run, apparently while the mop is removed.
 
