@@ -7,6 +7,7 @@ import logging
 from homeassistant.components.select import SelectEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import NarwalConfigEntry
 from .const import (
@@ -35,7 +36,7 @@ async def async_setup_entry(
     ])
 
 
-class NarwalCleanModeSelect(NarwalEntity, SelectEntity):
+class NarwalCleanModeSelect(NarwalEntity, SelectEntity, RestoreEntity):
     """Select entity for choosing the cleaning mode."""
 
     _attr_translation_key = "clean_mode"
@@ -47,7 +48,17 @@ class NarwalCleanModeSelect(NarwalEntity, SelectEntity):
         self._attr_unique_id = (
             f"{coordinator.config_entry.data['device_name']}_clean_mode"
         )
-        self._attr_current_option = CLEAN_MODE_LIST[0]
+        self._attr_current_option = next(
+            k for k, v in CLEAN_MODE_MAP.items()
+            if v == coordinator.selected_clean_mode
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last selected mode across restarts."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last and last.state in CLEAN_MODE_MAP:
+            await self.async_select_option(last.state)
 
     async def async_select_option(self, option: str) -> None:
         self._attr_current_option = option
@@ -57,7 +68,7 @@ class NarwalCleanModeSelect(NarwalEntity, SelectEntity):
         self.async_write_ha_state()
 
 
-class NarwalMopHumiditySelect(NarwalEntity, SelectEntity):
+class NarwalMopHumiditySelect(NarwalEntity, SelectEntity, RestoreEntity):
     """Mop wetness used for the next clean that involves mopping."""
 
     _attr_translation_key = "mop_humidity"
@@ -69,7 +80,17 @@ class NarwalMopHumiditySelect(NarwalEntity, SelectEntity):
         self._attr_unique_id = (
             f"{coordinator.config_entry.data['device_name']}_mop_humidity"
         )
-        self._attr_current_option = MOP_HUMIDITY_LIST[1]
+        self._attr_current_option = next(
+            k for k, v in MOP_HUMIDITY_MAP.items()
+            if v == coordinator.selected_mop_humidity
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last selected humidity across restarts."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last and last.state in MOP_HUMIDITY_MAP:
+            await self.async_select_option(last.state)
 
     async def async_select_option(self, option: str) -> None:
         self._attr_current_option = option

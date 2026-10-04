@@ -128,10 +128,9 @@ class NarwalState:
         if self.freo_x_plus:
             report = _parse_error_report(fields.get(1))
             if report:
+                if report[0] != self.error_code:
+                    _LOGGER.warning("Robot fault 0x%08X: %s", *report)
                 self.error_code, self.error_reason = report
-                _LOGGER.warning(
-                    "Robot fault 0x%08X: %s", self.error_code, self.error_reason,
-                )
             elif self.working_status != WorkingStatus.PAUSED:
                 # The report is pushed once; the robot then just shows the
                 # interrupted task as paused until it resumes or is recalled.

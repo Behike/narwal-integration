@@ -73,9 +73,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         )
         self.config_entry = entry
         self._cloud: NarwalCloud | None = None
-        self.selected_clean_mode: CleanMode = CleanMode.VACUUM_AND_MOP
+        self.selected_clean_mode: CleanMode = CleanMode.VACUUM_ONLY
         self.selected_fan_level: FanLevel = FanLevel.NORMAL
-        self.selected_mop_humidity: MopHumidity = MopHumidity.NORMAL
+        self.selected_mop_humidity: MopHumidity = MopHumidity.WET
         self._consecutive_failures: int = 0
         self._keepalive_unsub = None
 
