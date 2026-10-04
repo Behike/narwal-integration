@@ -735,11 +735,16 @@ Field 11 is a reliable dock indicator (2 = on the dock, 1 = off it).
 | `{1: N, 2: 1, ...}`   | Task N paused                            |
 | `{1: 10, 10: 1\|2}`   | Returning to dock (2 = docking manoeuvre) |
 
-Field 34 = 1 appears when the robot reports a fault (the task then shows
-as paused, e.g. `{1: 2, 2: 1, 4: 3}`), but also on the dock after a mop
-drying cycle (`{1: 1, 3: 5}` with field 11 = 2). The integration only
-treats it as an error while the robot is off the dock. The detailed app
-error codes (10xx/11xx) have not been located in the protocol yet.
+Faults are reported once in base_status **field 1** (empty otherwise):
+`{1: code, 2: level (2 = Error), 3: Chinese diagnostic text}`. The text
+ends with `产生错误的原因:<English cause>`, e.g. code `0x02020042`,
+"right mop uninstall when mopping". The interrupted task then shows as
+paused (`{1: N, 2: 1, ...}`) with field 1 empty again, so the integration
+keeps the fault until the task resumes or ends. These internal codes are
+not the 10xx/11xx codes shown by the app.
+
+Field 34 = 1 is not a fault flag: it shows up on the dock and during a
+normal vacuum run, apparently while the mop is removed.
 
 ### `clean/start_clean` payload
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import struct
 from dataclasses import dataclass, field
-from .const import ERROR_CODE_MESSAGES, ROOM_SUB_TYPE_NAMES, WorkingStatus
+from .const import ROOM_SUB_TYPE_NAMES, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,12 +48,10 @@ class NarwalState:
     # the room currently being cleaned. None when unknown.
     progress: float | None = None
     current_room_id: int | None = None
-    # Freo X Plus: base_status field 34. Set during a fault (the task then
-    # shows as paused) but also on the dock after mop drying. None = unset.
+    # Freo X Plus: last fault reported in base_status field 1, kept while
+    # the task it interrupted stays paused. None = no fault.
     error_code: int | None = None
-    # App error codes (10xx/11xx) if the robot sends them; not located in
-    # the protocol yet, so this stays empty until a capture shows where.
-    error_codes: list[int] = field(default_factory=list)
+    error_reason: str | None = None
     device_reachable: bool = False
     # Freo X Plus firmware uses a different working-status enum layout;
     # set by NarwalClient from the product key.
@@ -128,25 +126,18 @@ class NarwalState:
                         self.working_status = WorkingStatus.CLEANING
 
         if self.freo_x_plus:
-            err = fields.get(34)
-            self.error_code = err if isinstance(err, int) and err else None
-            self.error_codes = sorted(
-                _find_error_codes(fields.get(34)) | _find_error_codes(fields.get(25))
-            )
-            # Field 34 is also set on the dock after a mop drying cycle, so
-            # only treat it as a fault while the robot is off the dock.
-            on_dock = fields.get(11) == 2 or self.working_status in (
-                WorkingStatus.DOCKED, WorkingStatus.CHARGED,
-            )
-            if (self.error_code is not None or self.error_codes) and not on_dock:
-                self.working_status = WorkingStatus.ERROR
-            if self.working_status == WorkingStatus.ERROR and prev_status != WorkingStatus.ERROR:
-                # Full payload once per fault, to locate the app error code.
+            report = _parse_error_report(fields.get(1))
+            if report:
+                self.error_code, self.error_reason = report
                 _LOGGER.warning(
-                    "Robot fault: field34=%s codes=%s raw=%s",
-                    err, self.error_codes,
-                    {k: (v.hex() if isinstance(v, bytes) else v) for k, v in fields.items()},
+                    "Robot fault 0x%08X: %s", self.error_code, self.error_reason,
                 )
+            elif self.working_status != WorkingStatus.PAUSED:
+                # The report is pushed once; the robot then just shows the
+                # interrupted task as paused until it resumes or is recalled.
+                self.error_code = self.error_reason = None
+            if self.error_code is not None:
+                self.working_status = WorkingStatus.ERROR
 
         # Derive boolean flags from working_status (always, not just when
         # field 3 is present) so they stay in sync even if field 3 parsing
@@ -213,20 +204,28 @@ class NarwalState:
             self.cleaned_area = fields[13]
 
 
-def _find_error_codes(value: object, depth: int = 0) -> set[int]:
-    """Collect known app error codes from a varint or nested sub-message."""
-    if isinstance(value, int):
-        return {value} if value in ERROR_CODE_MESSAGES else set()
-    if not isinstance(value, bytes) or not value or depth > 3:
-        return set()
-    found: set[int] = set()
+def _parse_error_report(raw: object) -> tuple[int, str] | None:
+    """Decode a Freo X Plus fault report (base_status field 1).
+
+    Empty while all is well. On a fault the robot pushes once
+    {1: code, 2: level, 3: Chinese diagnostic text ending with
+    "产生错误的原因:<English cause>"}, e.g. code 0x02020042 with
+    "right mop uninstall when mopping".
+    """
+    if not isinstance(raw, bytes) or not raw:
+        return None
     try:
-        for vals in parse_protobuf_repeated(value).values():
-            for v in vals:
-                found |= _find_error_codes(v, depth + 1)
+        report = parse_protobuf_fields(raw)
     except (IndexError, ValueError):
-        pass
-    return found
+        return None
+    code = report.get(1)
+    if not isinstance(code, int) or not code:
+        return None
+    text = report.get(3)
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    reason = text.rsplit("原因:", 1)[-1].strip() if isinstance(text, str) else ""
+    return code, reason or f"Error 0x{code:08X}"
 
 
 def _as_float32(raw: object) -> float | None:

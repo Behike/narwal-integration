@@ -127,26 +127,3 @@ ROOM_SUB_TYPE_NAMES: dict[int, str] = {
     15: "Other",
 }
 
-
-# Error codes shown by the Narwal app for the Freo X Plus (reported by a
-# user; the app groups several codes under the same message).
-ROBOT_STUCK = "Robot stuck, remove obstacles or move the robot"
-ERROR_CODE_MESSAGES: dict[int, str] = {
-    1012: ROBOT_STUCK,
-    1014: "Both wheels blocked",
-    1015: "Left wheel blocked",
-    1016: "Right wheel blocked",
-    1020: "Charging problem, robot does not detect the base",
-    1021: "Charging problem, robot does not detect the base",
-    1036: "Mop problem (mop missing?)",
-    1043: ROBOT_STUCK,
-    1044: "Something is tangled in the roller brush",
-    1123: ROBOT_STUCK,
-    1124: ROBOT_STUCK,
-    1126: ROBOT_STUCK,
-    1127: "Failed to return to the base, remove obstacles around robot and base",
-    1142: ROBOT_STUCK,
-    1143: ROBOT_STUCK,
-    1144: ROBOT_STUCK,
-    1145: ROBOT_STUCK,
-}
