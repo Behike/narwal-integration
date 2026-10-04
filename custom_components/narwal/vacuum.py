@@ -98,6 +98,12 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             attrs["rooms"] = {
                 r.room_id: r.display_name for r in state.rooms
             }
+        if state and state.error_code is not None:
+            # Also here (not only on the status sensor) so automations
+            # triggered by the vacuum turning to "error" see the cause:
+            # the sensor's state is written after the vacuum's.
+            attrs["error_code"] = f"0x{state.error_code:08X}"
+            attrs["error_reason"] = state.error_reason
         return attrs
 
     async def async_start(self) -> None:
