@@ -245,6 +245,35 @@ field 1 (sub-message) {           // CleanConfig
 }
 ```
 
+**Freo X Plus `clean/start_clean` payload** (captured from the app, firmware
+as of 2026-10). The task is repeated once per room; each entry carries its own
+settings and its position in the run:
+```
+field 1 (sub-message) {
+  field 1 = 1
+  field 2 (sub-message, repeated) {    // Task, one per room
+    field 1 (sub-message) {            // Scope
+      field 1 = 3                      // whole house, or
+      field 1 = 1, field 2 = <room_id> // one room, or
+      field 1 = 2, field 2 = 1, ...    // a zone drawn in the app (see below)
+    }
+    field 2 (sub-message) { ... }      // settings, see _build_clean_payload_freo_x_plus
+    field 3 = <order>                  // 0 for whole house, else 1, 2, ... in cleaning order
+  }
+  field 3 (sub-message) { field 1 = 1, field 5 = 0 }
+  field 5 = <app mode>                 // 1 vacuum, 2 mop, 3 vacuum then mop, 4 vacuum & mop
+}
+```
+Putting several rooms into one task entry (with order 0) makes the robot
+ignore the room list and clean the whole house.
+
+Zone scopes (`field 1 = 2`) also carry the zone's corners (repeated field 3,
+`{1: x, 2: y}`, 4 points) and the cell outline the app computed (repeated
+field 4, `{1: x, 2: y}`, one entry per map cell, about 2 KB for a small zone).
+Coordinates are map cells, negative values as 64-bit two's complement. These
+are only practical to build with the app's map editor, so the integration
+doesn't send them.
+
 `clean/plan/start` is **not recommended** — it returns NOT_APPLICABLE (code=2)
 on Freo X Ultra and likely other newer models.
 
@@ -366,6 +395,15 @@ Dock detection for STANDBY/UNKNOWN uses multiple signals: `dock_sub_state==1`,
 | 3     | Elapsed time (seconds)             |
 | 13    | Cleaned area (cm²; 18000 = 1.8m²) |
 | 15    | Unknown (600 during cleaning)      |
+
+On the Freo X Plus, field 1 is progress (float32 %), field 2 the cleaned area
+(float32), and field 5 is repeated: the task's rooms in cleaning order, each
+`{1: room_id}`. Once the robot starts a room, that entry gains field 4 (seen:
+1, later 2 when finished or abandoned), so the current room is the last entry
+with field 4. Example while cleaning the hallway (room 8) of a
+kitchen, bathroom, hallway, toilet run:
+`[{1:5, 4:2}, {1:6, 4:1}, {1:8, 4:1}, {1:4}]`. A single-room task never
+sets field 4; its entry only gained `{2: 1}` when the room was done.
 
 ### 5.4 Battery Decoding
 

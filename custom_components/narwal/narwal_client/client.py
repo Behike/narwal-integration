@@ -517,11 +517,11 @@ class NarwalClient:
 
         Captured from the Narwal app (fields relative to the outer field 1):
           1: 1
-          2: {                                   task
+          2: {                                   task, repeated once per room
                1: {1: 3}                         whole house, or
-               1: {1: 1, 2: room_id}             one entry per room ...
-               2: {settings}                     ... each followed by settings
-               3: 0
+               1: {1: 1, 2: room_id}             a single room
+               2: {settings}
+               3: order                          0 for whole house, else 1, 2, ...
              }
           3: {1: 1 for Vacuum & Mop else 0, 5: 0}
           5: app mode (1 vacuum, 2 mop, 3 vacuum then mop, 4 vacuum & mop)
@@ -545,19 +545,25 @@ class NarwalClient:
             + b"".join(_make_protobuf_varint(f, v) for f, v in tail)
         )
 
-        task = b""
+        def task(scope: bytes, order: int) -> bytes:
+            return _make_protobuf_string(
+                2,
+                _make_protobuf_string(1, scope)
+                + _make_protobuf_string(2, settings)
+                + _make_protobuf_varint(3, order),
+            )
+
         if room_ids:
-            for rid in room_ids:
-                scope = _make_protobuf_varint(1, 1) + _make_protobuf_varint(2, rid)
-                task += _make_protobuf_string(1, scope) + _make_protobuf_string(2, settings)
+            tasks = b"".join(
+                task(_make_protobuf_varint(1, 1) + _make_protobuf_varint(2, rid), order)
+                for order, rid in enumerate(room_ids, start=1)
+            )
         else:
-            task += _make_protobuf_string(1, _make_protobuf_varint(1, 3))
-            task += _make_protobuf_string(2, settings)
-        task += _make_protobuf_varint(3, 0)
+            tasks = task(_make_protobuf_varint(1, 3), 0)
 
         clean_config = (
             _make_protobuf_varint(1, 1)
-            + _make_protobuf_string(2, task)
+            + tasks
             + _make_protobuf_string(
                 3,
                 _make_protobuf_varint(1, 1 if mode == CleanMode.VACUUM_AND_MOP else 0)

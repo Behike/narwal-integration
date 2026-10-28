@@ -190,17 +190,36 @@ class NarwalState:
         if self.freo_x_plus:
             # Freo X Plus layout (captured):
             #   1 (float32) progress %, 2 (float32) cleaned area m²,
-            #   3 elapsed s, 5 {1: current room id}; 11/13/15 are constants
+            #   3 elapsed s, 5 (repeated) the task's rooms in cleaning order,
+            #   {1: room id, 4: status}; 11/13/15 are constants
             #   (2700 / 18000 / 600), so field 13 is NOT the cleaned area.
             # Fields 1 and 2 only appear once the robot reaches the first
             # room; a new task restarts without them.
             self.progress = _as_float32(fields.get(1)) or 0.0
             self.cleaned_area = round((_as_float32(fields.get(2)) or 0.0) * 10000)
-            room = fields.get(5)
-            sub = parse_protobuf_fields(room) if isinstance(room, bytes) else {}
-            self.current_room_id = sub.get(1) if isinstance(sub.get(1), int) else None
+            self.current_room_id = _current_room_from_queue(
+                parse_protobuf_repeated(payload).get(5, [])
+            )
         elif 13 in fields and isinstance(fields[13], int):
             self.cleaned_area = fields[13]
+
+
+def _current_room_from_queue(entries: list) -> int | None:
+    """Pick the room being cleaned from the Freo X Plus room queue.
+
+    In a multi-room task each entry is {1: room id} until the robot starts
+    that room, then it also carries field 4, so the current room is the last
+    entry that has field 4. A single-room task never sets field 4.
+    """
+    rooms = [parse_protobuf_fields(e) for e in entries if isinstance(e, bytes)]
+    rooms = [r for r in rooms if isinstance(r.get(1), int)]
+    if len(rooms) == 1:
+        return rooms[0][1]
+    current = None
+    for room in rooms:
+        if 4 in room:
+            current = room[1]
+    return current
 
 
 def _parse_error_report(raw: object) -> tuple[int, str] | None:
