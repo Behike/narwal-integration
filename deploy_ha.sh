@@ -1,5 +1,5 @@
 #!/bin/sh
-# Deploy the local Freo X Plus build (branch freo-x-plus-0.10) into Home
+# Deploy the local Freo X Plus build (branch main) into Home
 # Assistant and tell Marketplace which upstream release it is based on, so
 # it stops offering that release as an update.
 # Usage: sh deploy_ha.sh            (run from anywhere)
@@ -9,7 +9,7 @@ HA=/home/dietpi/Projects/HomeAssistant/ha_data
 BASE_TAG=$(git -C "$REPO" describe --tags --abbrev=0)          # e.g. v0.10.1
 BASE_COMMIT=$(git -C "$REPO" rev-parse --short=7 "$BASE_TAG^{commit}")
 
-[ "$(git -C "$REPO" branch --show-current)" = freo-x-plus-0.10 ] || { echo "checkout freo-x-plus-0.10 first"; exit 1; }
+[ "$(git -C "$REPO" branch --show-current)" = main ] || { echo "checkout main first"; exit 1; }
 echo "Deploying $(git -C "$REPO" log --oneline -1) (base $BASE_TAG)"
 
 docker stop -t 120 homeassistant
